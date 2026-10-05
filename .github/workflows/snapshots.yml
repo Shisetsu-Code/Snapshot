@@ -1,0 +1,48 @@
+name: Capture Pragmatic Play snapshots
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "package.json"
+      - ".github/workflows/snapshots.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Capture 25 demos
+        run: npm run capture
+
+      - name: Commit snapshots
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add snapshots
+          if git diff --cached --quiet; then
+            echo "No snapshot changes"
+            exit 0
+          fi
+          git commit -m "chore: refresh 25 demo snapshots"
+          git push
