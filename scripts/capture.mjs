@@ -21,34 +21,67 @@ function slugify(value) {
 
 async function clickIfVisible(locator, timeout = 1200) {
   try {
-    if (await locator.first().isVisible({ timeout })) {
-      await locator.first().click({ timeout: 3000 });
-      return true;
+    const first = locator.first();
+    if (!(await first.isVisible({ timeout }))) return false;
+
+    try {
+      await first.click({ timeout: 1800 });
+    } catch {
+      await first.evaluate((el) => el.click());
     }
+
+    return true;
   } catch {}
+
   return false;
 }
 
 async function dismissSiteOverlays(page) {
-  const ageButtons = [
-    page.getByRole("button", { name: /Yes, I am 18 years or older/i }),
-    page.getByText(/Yes, I am 18 years or older/i, { exact: true })
-  ];
-  for (const locator of ageButtons) {
-    if (await clickIfVisible(locator, 900)) break;
+  for (let round = 0; round < 3; round++) {
+    const cookiePatterns = [
+      /Accept All/i,
+      /Accept all/i,
+      /Accept cookies/i,
+      /Allow all/i,
+      /I agree/i
+    ];
+
+    for (const pattern of cookiePatterns) {
+      const byRole = page.getByRole("button", { name: pattern });
+      if (await clickIfVisible(byRole, 500)) {
+        await page.waitForTimeout(180);
+        break;
+      }
+    }
+
+    const ageButtons = [
+      page.getByRole("button", { name: /Yes, I am 18 years or older/i }),
+      page.getByText(/Yes, I am 18 years or older/i, { exact: true })
+    ];
+
+    for (const locator of ageButtons) {
+      if (await clickIfVisible(locator, 650)) {
+        await page.waitForTimeout(180);
+        break;
+      }
+    }
+
+    const ageStillVisible = await page
+      .getByText(/Pragmatic Play content is intended for persons 18 years and above/i)
+      .first()
+      .isVisible({ timeout: 250 })
+      .catch(() => false);
+
+    const cookieStillVisible = await page
+      .getByText(/We value your privacy/i)
+      .first()
+      .isVisible({ timeout: 250 })
+      .catch(() => false);
+
+    if (!ageStillVisible && !cookieStillVisible) break;
   }
 
-  const cookiePatterns = [
-    /Accept all/i,
-    /Accept cookies/i,
-    /Allow all/i,
-    /I agree/i
-  ];
-  for (const pattern of cookiePatterns) {
-    if (await clickIfVisible(page.getByRole("button", { name: pattern }), 500)) break;
-  }
-
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(300);
 }
 
 function demoButtons(page) {
@@ -137,10 +170,13 @@ async function advanceObviousDialogs(page) {
 
 async function waitUntilRendered(page) {
   await page.waitForLoadState("domcontentloaded", { timeout: 7000 }).catch(() => {});
-  await page.waitForTimeout(2500);
+  await dismissSiteOverlays(page).catch(() => {});
+  await page.waitForTimeout(1800);
 
-  for (let i = 0; i < 10; i++) {
-    const rendered = await page.evaluate(() => {
+  let rendered = false;
+
+  for (let i = 0; i < 18; i++) {
+    rendered = await page.evaluate(() => {
       const visibleArea = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -153,11 +189,31 @@ async function waitUntilRendered(page) {
     }).catch(() => false);
 
     if (rendered) break;
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(450);
+  }
+
+  if (!rendered) {
+    throw new Error("game render surface not found");
+  }
+
+  const blockedByAge = await page
+    .getByText(/Pragmatic Play content is intended for persons 18 years and above/i)
+    .first()
+    .isVisible({ timeout: 250 })
+    .catch(() => false);
+
+  const blockedByCookies = await page
+    .getByText(/We value your privacy/i)
+    .first()
+    .isVisible({ timeout: 250 })
+    .catch(() => false);
+
+  if (blockedByAge || blockedByCookies) {
+    throw new Error("consent overlay still visible");
   }
 
   await advanceObviousDialogs(page);
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(900);
 }
 
 async function screenshotGame(page) {
@@ -243,6 +299,30 @@ async function main() {
 
   const seen = new Set();
   const rows = [];
+
+  // Establish consent once in this browser context so every parallel catalog
+  // tab inherits the same cookie/localStorage state.
+  const bootstrap = await context.newPage();
+  await bootstrap.goto(CATALOG, { waitUntil: "domcontentloaded", timeout: 20000 });
+  await dismissSiteOverlays(bootstrap);
+
+  const ageVisible = await bootstrap
+    .getByText(/Pragmatic Play content is intended for persons 18 years and above/i)
+    .first()
+    .isVisible({ timeout: 300 })
+    .catch(() => false);
+
+  const cookiesVisible = await bootstrap
+    .getByText(/We value your privacy/i)
+    .first()
+    .isVisible({ timeout: 300 })
+    .catch(() => false);
+
+  if (ageVisible || cookiesVisible) {
+    throw new Error("could not establish catalog consent state");
+  }
+
+  await bootstrap.close();
 
   const BATCH_SIZE = 4;
 
