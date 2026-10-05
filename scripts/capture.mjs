@@ -2,9 +2,9 @@ import { chromium } from "playwright";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const CATALOG = process.env.CATALOG_URL || "https://www.pragmaticplay.fun/en/slots/";
-const TARGET = Number(process.env.GAME_LIMIT || 25);
-const MAX_CANDIDATES = Number(process.env.MAX_CANDIDATES || 90);
+const CATALOG = "https://www.pragmaticplay.fun/en/slots/";
+const TARGET = 25;
+const MAX_CANDIDATES = 48;
 const VIEWPORT = { width: 1280, height: 720 };
 const OUT = path.resolve("snapshots");
 
@@ -19,18 +19,10 @@ function slugify(value) {
     .slice(0, 80) || "game";
 }
 
-function cleanTitle(value) {
-  return String(value || "")
-    .replace(/\s*[|–—-]\s*Pragmatic Play.*$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function clickIfVisible(locator, timeout = 900) {
+async function clickIfVisible(locator, timeout = 1200) {
   try {
-    const first = locator.first();
-    if (await first.isVisible({ timeout })) {
-      await first.click({ timeout: 2500 });
+    if (await locator.first().isVisible({ timeout })) {
+      await locator.first().click({ timeout: 3000 });
       return true;
     }
   } catch {}
@@ -38,111 +30,79 @@ async function clickIfVisible(locator, timeout = 900) {
 }
 
 async function dismissSiteOverlays(page) {
-  for (const selector of ["#onetrust-accept-btn-handler", "[data-testid='cookie-accept-all']"]) {
-    try {
-      if (await clickIfVisible(page.locator(selector), 350)) break;
-    } catch {}
+  const ageButtons = [
+    page.getByRole("button", { name: /Yes, I am 18 years or older/i }),
+    page.getByText(/Yes, I am 18 years or older/i, { exact: true })
+  ];
+  for (const locator of ageButtons) {
+    if (await clickIfVisible(locator, 900)) break;
   }
 
-  for (const pattern of [/Accept all/i, /Accept cookies/i, /Allow all/i, /I agree/i]) {
-    if (await clickIfVisible(page.getByRole("button", { name: pattern }), 350)) break;
+  const cookiePatterns = [
+    /Accept all/i,
+    /Accept cookies/i,
+    /Allow all/i,
+    /I agree/i
+  ];
+  for (const pattern of cookiePatterns) {
+    if (await clickIfVisible(page.getByRole("button", { name: pattern }), 500)) break;
   }
 
-  for (const pattern of [
-    /Yes, I am 18 years or older/i,
-    /I am 18 years or older/i,
-    /I am over 18/i
-  ]) {
-    if (await clickIfVisible(page.getByRole("button", { name: pattern }), 650)) break;
-  }
-
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(400);
 }
 
-async function ensureCatalogButtons(page, wanted = 45) {
-  for (let round = 0; round < 14; round++) {
-    const count = await page.locator('[data-play-demo-open="true"][data-game-symbol]').count();
-    if (count >= wanted) return count;
+function demoButtons(page) {
+  return page.locator("button, a").filter({ hasText: /^\s*Play Demo\s*$/i });
+}
+
+async function ensureDemoCount(page, wanted) {
+  for (let round = 0; round < 20; round++) {
+    const count = await demoButtons(page).count();
+    if (count > wanted) return count;
 
     const loadMore = page.getByRole("button", { name: /Load More/i });
-    if (!(await clickIfVisible(loadMore, 650))) return count;
+    if (!(await clickIfVisible(loadMore, 700))) return count;
 
-    await page.waitForTimeout(650);
+    await page.waitForTimeout(900);
   }
-
-  return await page.locator('[data-play-demo-open="true"][data-game-symbol]').count();
+  return await demoButtons(page).count();
 }
 
-async function discoverCandidates(context) {
-  const page = await context.newPage();
-
+async function inferTitle(button, fallback) {
   try {
-    await page.goto(CATALOG, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await dismissSiteOverlays(page);
-    await page.waitForTimeout(700);
-    await ensureCatalogButtons(page, Math.min(MAX_CANDIDATES, 55));
+    const title = await button.evaluate((el) => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      let p = el.parentElement;
 
-    const raw = await page
-      .locator('[data-play-demo-open="true"][data-game-symbol]')
-      .evaluateAll((nodes) => nodes.map((el) => {
-        const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-        const symbol = clean(el.getAttribute("data-game-symbol"));
-        const banner = clean(el.getAttribute("data-banner-image"));
-        let title = "";
+      for (let depth = 0; p && depth < 10; depth++, p = p.parentElement) {
+        const demos = [...p.querySelectorAll("button, a")]
+          .filter((node) => /play demo/i.test(clean(node.textContent)));
 
-        for (let p = el.parentElement, depth = 0; p && depth < 9; p = p.parentElement, depth++) {
-          const buttons = p.querySelectorAll('[data-play-demo-open="true"][data-game-symbol]');
-          if (buttons.length !== 1) continue;
+        if (demos.length !== 1) continue;
 
-          for (const img of p.querySelectorAll("img[alt]")) {
-            const alt = clean(img.getAttribute("alt"));
-            if (
-              alt &&
-              alt.length < 120 &&
-              !/pragmatic|logo|featured release|18\\+/i.test(alt)
-            ) {
-              title = alt;
-              break;
-            }
+        const headings = [...p.querySelectorAll("h1,h2,h3,h4,h5,h6,[class*='title'],[class*='name']")];
+        for (const h of headings) {
+          const t = clean(h.textContent);
+          if (t && !/play demo|more info|featured release|all slots/i.test(t) && t.length < 120) {
+            return t;
           }
-
-          if (title) break;
-
-          for (const heading of p.querySelectorAll("h1,h2,h3,h4,h5,h6,[class*='title'],[class*='name']")) {
-            const text = clean(heading.textContent);
-            if (
-              text &&
-              text.length < 120 &&
-              !/play demo|more info|featured release|all slots|load more/i.test(text)
-            ) {
-              title = text;
-              break;
-            }
-          }
-
-          if (title) break;
         }
 
-        return { symbol, title, banner };
-      }));
+        const images = [...p.querySelectorAll("img[alt]")];
+        for (const img of images) {
+          const t = clean(img.getAttribute("alt"));
+          if (t && !/pragmatic|logo|mega release/i.test(t) && t.length < 120) {
+            return t;
+          }
+        }
+      }
 
-    const seen = new Set();
-    const candidates = [];
+      return "";
+    });
 
-    for (const item of raw) {
-      if (!item.symbol || seen.has(item.symbol)) continue;
-      seen.add(item.symbol);
-      candidates.push({
-        symbol: item.symbol,
-        title: item.title || item.symbol,
-        banner: item.banner || null
-      });
-    }
-
-    console.log(`catalog: discovered ${candidates.length} unique game symbols`);
-    return candidates.slice(0, MAX_CANDIDATES);
-  } finally {
-    await page.close().catch(() => {});
+    return title || fallback;
+  } catch {
+    return fallback;
   }
 }
 
@@ -152,181 +112,218 @@ async function advanceObviousDialogs(page) {
     /^Continue$/i,
     /^Got it$/i,
     /^Skip$/i,
+    /^Close$/i,
     /^I understand$/i
   ];
 
-  for (let round = 0; round < 4; round++) {
+  for (let round = 0; round < 3; round++) {
     let acted = false;
-
     for (const frame of page.frames()) {
       for (const pattern of patterns) {
         try {
-          const button = frame.getByRole("button", { name: pattern }).first();
-          if (await button.isVisible({ timeout: 180 })) {
-            await button.click({ timeout: 1200 });
-            await page.waitForTimeout(250);
+          const loc = frame.getByRole("button", { name: pattern });
+          if (await loc.first().isVisible({ timeout: 300 })) {
+            await loc.first().click({ timeout: 1500 });
             acted = true;
+            await page.waitForTimeout(250);
             break;
           }
         } catch {}
       }
-
-      if (acted) break;
     }
-
     if (!acted) break;
   }
 }
 
-async function hasLargeRenderSurface(page) {
-  return await page.evaluate(() => {
-    const area = (el) => {
-      const rect = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return 0;
-      return Math.max(0, rect.width) * Math.max(0, rect.height);
-    };
-
-    return [...document.querySelectorAll("iframe, canvas")]
-      .some((el) => area(el) > 150000);
-  }).catch(() => false);
-}
-
 async function waitUntilRendered(page) {
-  await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-  await dismissSiteOverlays(page).catch(() => {});
-  await page.waitForTimeout(1800);
+  await page.waitForLoadState("domcontentloaded", { timeout: 7000 }).catch(() => {});
+  await page.waitForTimeout(2500);
 
-  for (let i = 0; i < 24; i++) {
-    if (await hasLargeRenderSurface(page)) break;
-    await page.waitForTimeout(400);
+  for (let i = 0; i < 10; i++) {
+    const rendered = await page.evaluate(() => {
+      const visibleArea = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return s.visibility !== "hidden" && s.display !== "none" && r.width * r.height;
+      };
+
+      const canvases = [...document.querySelectorAll("canvas")];
+      const iframes = [...document.querySelectorAll("iframe")];
+      return [...canvases, ...iframes].some((el) => visibleArea(el) > 180000);
+    }).catch(() => false);
+
+    if (rendered) break;
+    await page.waitForTimeout(500);
   }
 
   await advanceObviousDialogs(page);
-  await page.waitForTimeout(900);
+  await page.waitForTimeout(1000);
 }
 
-async function largestVisibleIframe(page) {
+async function screenshotGame(page) {
   const frames = page.locator("iframe:visible");
   const count = await frames.count();
   let best = null;
   let bestArea = 0;
 
   for (let i = 0; i < count; i++) {
-    const locator = frames.nth(i);
+    const loc = frames.nth(i);
     try {
-      const box = await locator.boundingBox();
+      const box = await loc.boundingBox();
       if (!box) continue;
       const area = box.width * box.height;
       if (area > bestArea) {
-        best = locator;
+        best = loc;
         bestArea = area;
       }
     } catch {}
   }
 
-  return bestArea > 150000 ? best : null;
-}
-
-async function captureBest(page) {
-  let best = null;
-  let mode = "viewport";
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const iframe = await largestVisibleIframe(page);
-    let jpg;
-    let currentMode;
-
-    if (iframe) {
-      jpg = await iframe.screenshot({
-        type: "jpeg",
-        quality: 65,
-        animations: "disabled"
-      });
-      currentMode = "iframe";
-    } else {
-      jpg = await page.screenshot({
-        type: "jpeg",
-        quality: 65,
-        fullPage: false,
-        animations: "disabled"
-      });
-      currentMode = "viewport";
-    }
-
-    if (!best || jpg.length > best.length) {
-      best = jpg;
-      mode = currentMode;
-    }
-
-    if (attempt < 2) await page.waitForTimeout(1600);
+  if (best && bestArea > 180000) {
+    return await best.screenshot({ type: "jpeg", quality: 65 });
   }
 
-  if (!best || best.length < 15000) {
-    throw new Error(`rendered screenshot too small (${best?.length || 0} bytes)`);
-  }
-
-  return { jpg: best, mode };
+  return await page.screenshot({
+    type: "jpeg",
+    quality: 65,
+    fullPage: false,
+    animations: "disabled"
+  });
 }
 
-async function openCatalogCandidate(context, candidate) {
+async function openCandidate(context, candidateIndex) {
   const catalog = await context.newPage();
-  let popup = null;
+  await catalog.goto(CATALOG, { waitUntil: "domcontentloaded", timeout: 20000 });
+  await dismissSiteOverlays(catalog);
+  await catalog.waitForTimeout(1000);
+
+  const count = await ensureDemoCount(catalog, candidateIndex);
+  if (count <= candidateIndex) {
+    await catalog.close();
+    return null;
+  }
+
+  const button = demoButtons(catalog).nth(candidateIndex);
+  const title = await inferTitle(button, `Game ${candidateIndex + 1}`);
+
+  const popupPromise = catalog.waitForEvent("popup", { timeout: 2500 }).catch(() => null);
+
+  // The catalog keeps some valid game cards outside Chromium's reported viewport.
+  // Trigger the site's own Play Demo handler directly instead of requiring
+  // Playwright's physical scroll/click actionability check.
+  await button.evaluate((el) => el.click());
+  const popup = await popupPromise;
+  const demo = popup || catalog;
+
+  if (popup) {
+    await popup.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
+  }
+
+  await waitUntilRendered(demo);
+  return { catalog, demo, popup, title };
+}
+
+async function main() {
+  await fs.rm(OUT, { recursive: true, force: true });
+  await fs.mkdir(OUT, { recursive: true });
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      "--autoplay-policy=no-user-gesture-required",
+      "--disable-dev-shm-usage"
+    ]
+  });
+
+  const context = await browser.newContext({
+    viewport: VIEWPORT,
+    locale: "en-GB",
+    reducedMotion: "reduce"
+  });
+
+  const seen = new Set();
+  const rows = [];
+
+  const BATCH_SIZE = 4;
 
   try {
-    await catalog.goto(CATALOG, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await dismissSiteOverlays(catalog);
-    await catalog.waitForTimeout(450);
+    for (let base = 0; base < MAX_CANDIDATES && rows.length < TARGET; base += BATCH_SIZE) {
+      const indices = Array.from(
+        { length: Math.min(BATCH_SIZE, MAX_CANDIDATES - base) },
+        (_, i) => base + i
+      );
 
-    let button = catalog.locator(
-      `[data-play-demo-open="true"][data-game-symbol="${candidate.symbol}"]`
-    ).first();
+      const captures = await Promise.all(indices.map(async (candidateIndex) => {
+        let session = null;
 
-    for (let round = 0; round < 14 && (await button.count()) === 0; round++) {
-      const loadMore = catalog.getByRole("button", { name: /Load More/i });
-      if (!(await clickIfVisible(loadMore, 500))) break;
-      await catalog.waitForTimeout(550);
-      button = catalog.locator(
-        `[data-play-demo-open="true"][data-game-symbol="${candidate.symbol}"]`
-      ).first();
+        try {
+          console.log(`[candidate ${candidateIndex + 1}] opening`);
+          session = await openCandidate(context, candidateIndex);
+          if (!session) return null;
+
+          const jpg = await screenshotGame(session.demo);
+          if (!jpg || jpg.length < 12_000) {
+            throw new Error(`screenshot too small (${jpg?.length || 0} bytes)`);
+          }
+
+          return {
+            candidateIndex,
+            title: session.title,
+            demoUrl: session.demo.url(),
+            jpg
+          };
+        } catch (error) {
+          console.warn(`candidate ${candidateIndex + 1} failed: ${error.message}`);
+          return null;
+        } finally {
+          if (session?.popup && !session.popup.isClosed()) {
+            await session.popup.close().catch(() => {});
+          }
+          if (session?.catalog && !session.catalog.isClosed()) {
+            await session.catalog.close().catch(() => {});
+          }
+        }
+      }));
+
+      for (const capture of captures) {
+        if (!capture || rows.length >= TARGET) continue;
+
+        const key = capture.title.trim().toLowerCase();
+        if (seen.has(key)) {
+          console.log(`skip duplicate: ${capture.title}`);
+          continue;
+        }
+
+        const n = String(rows.length + 1).padStart(2, "0");
+        const file = `${n}-${slugify(capture.title)}.jpg`;
+        await fs.writeFile(path.join(OUT, file), capture.jpg);
+
+        seen.add(key);
+        rows.push({
+          number: rows.length + 1,
+          title: capture.title,
+          file,
+          catalogIndex: capture.candidateIndex,
+          demoUrl: capture.demoUrl,
+          jpegQuality: 65,
+          viewport: VIEWPORT,
+          capturedAt: new Date().toISOString()
+        });
+
+        console.log(`saved ${file} (${capture.jpg.length} bytes)`);
+      }
     }
-
-    if ((await button.count()) === 0) {
-      throw new Error(`catalog button not found for ${candidate.symbol}`);
-    }
-
-    const clickedSymbol = await button.getAttribute("data-game-symbol");
-    if (clickedSymbol !== candidate.symbol) {
-      throw new Error(`symbol mismatch: expected ${candidate.symbol}, got ${clickedSymbol}`);
-    }
-
-    const popupPromise = context.waitForEvent("page", { timeout: 2800 }).catch(() => null);
-
-    await button.evaluate((el) => el.click());
-    await catalog.waitForTimeout(200);
-    popup = await popupPromise;
-
-    const demo = popup || catalog;
-
-    if (popup) {
-      await popup.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-    }
-
-    await waitUntilRendered(demo);
-    return { catalog, popup, demo };
-  } catch (error) {
-    if (popup && !popup.isClosed()) await popup.close().catch(() => {});
-    if (!catalog.isClosed()) await catalog.close().catch(() => {});
-    throw error;
+  } finally {
+    await browser.close();
   }
-}
 
-async function writeIndex(rows, complete) {
+  if (rows.length !== TARGET) {
+    throw new Error(`Expected ${TARGET} screenshots, produced ${rows.length}`);
+  }
+
   const index = {
     source: CATALOG,
-    requested: TARGET,
     count: rows.length,
-    complete,
     jpegQuality: 65,
     viewport: VIEWPORT,
     generatedAt: new Date().toISOString(),
@@ -338,97 +335,6 @@ async function writeIndex(rows, complete) {
     JSON.stringify(index, null, 2) + "\n",
     "utf8"
   );
-}
-
-async function main() {
-  await fs.rm(OUT, { recursive: true, force: true });
-  await fs.mkdir(OUT, { recursive: true });
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      "--autoplay-policy=no-user-gesture-required",
-      "--disable-dev-shm-usage",
-      "--no-sandbox"
-    ]
-  });
-
-  const context = await browser.newContext({
-    viewport: VIEWPORT,
-    locale: "en-GB",
-    reducedMotion: "reduce"
-  });
-
-  const rows = [];
-  const seenSymbols = new Set();
-
-  try {
-    const candidates = await discoverCandidates(context);
-
-    if (candidates.length < TARGET) {
-      throw new Error(`catalog exposed only ${candidates.length} unique games`);
-    }
-
-    for (let i = 0; i < candidates.length && rows.length < TARGET; i++) {
-      const candidate = candidates[i];
-      let session = null;
-
-      try {
-        console.log(
-          `[${rows.length + 1}/${TARGET}] ${candidate.title} [${candidate.symbol}]`
-        );
-
-        if (seenSymbols.has(candidate.symbol)) continue;
-        session = await openCatalogCandidate(context, candidate);
-
-        const { jpg, mode } = await captureBest(session.demo);
-        const n = String(rows.length + 1).padStart(2, "0");
-        const safeTitle = slugify(candidate.title);
-        const file = `${n}-${safeTitle}-${candidate.symbol}.jpg`;
-
-        await fs.writeFile(path.join(OUT, file), jpg);
-
-        seenSymbols.add(candidate.symbol);
-        rows.push({
-          number: rows.length + 1,
-          title: candidate.title,
-          symbol: candidate.symbol,
-          file,
-          catalogUrl: CATALOG,
-          demoUrl: session.demo.url(),
-          banner: candidate.banner,
-          captureMode: mode,
-          bytes: jpg.length,
-          jpegQuality: 65,
-          viewport: VIEWPORT,
-          capturedAt: new Date().toISOString()
-        });
-
-        await writeIndex(rows, rows.length === TARGET);
-        console.log(
-          `saved ${file} (${jpg.length} bytes, ${mode}, symbol=${candidate.symbol})`
-        );
-      } catch (error) {
-        console.warn(
-          `candidate ${candidate.symbol} failed: ${error.message}`
-        );
-      } finally {
-        if (session?.popup && !session.popup.isClosed()) {
-          await session.popup.close().catch(() => {});
-        }
-        if (session?.catalog && !session.catalog.isClosed()) {
-          await session.catalog.close().catch(() => {});
-        }
-      }
-    }
-  } finally {
-    await writeIndex(rows, rows.length === TARGET).catch(() => {});
-    await browser.close();
-  }
-
-  if (rows.length !== TARGET) {
-    throw new Error(`Expected ${TARGET} screenshots, produced ${rows.length}`);
-  }
 
   console.log(`done: ${rows.length} screenshots`);
 }
