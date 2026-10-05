@@ -377,7 +377,32 @@ async function main() {
     .catch(() => false);
 
   if (ageVisible || cookiesVisible) {
-    throw new Error("could not establish catalog consent state");
+    const controls = await bootstrap.locator("button,a,[role='button']").evaluateAll((nodes) =>
+      nodes.map((el, i) => ({
+        i,
+        text: (el.textContent || el.value || "").replace(/\\s+/g, " ").trim().slice(0, 160),
+        id: el.id || null,
+        cls: typeof el.className === "string" ? el.className.slice(0, 180) : null,
+        visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+      })).filter((x) => x.text)
+    ).catch(() => []);
+
+    console.log("CONSENT_DEBUG_CONTROLS=" + JSON.stringify(controls.slice(0, 120)));
+    console.log("CONSENT_DEBUG_FRAMES=" + JSON.stringify(
+      bootstrap.frames().map((frame) => frame.url())
+    ));
+
+    await fs.mkdir(OUT, { recursive: true });
+    await bootstrap.screenshot({
+      path: path.join(OUT, "debug-consent.jpg"),
+      type: "jpeg",
+      quality: 65,
+      fullPage: false
+    }).catch(() => {});
+
+    throw new Error(
+      `could not establish catalog consent state (age=${ageVisible}, cookies=${cookiesVisible})`
+    );
   }
 
   await bootstrap.close();
