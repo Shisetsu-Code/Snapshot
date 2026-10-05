@@ -1,0 +1,12 @@
+{
+  "name": "pragmaticplay-snapshot",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "capture": "node scripts/capture.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.55.0"
+  }
+}
