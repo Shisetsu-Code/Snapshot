@@ -12,10 +12,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: pragmatic-snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -24,10 +28,10 @@ jobs:
       - name: Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --no-audit --no-fund
 
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
@@ -35,7 +39,17 @@ jobs:
       - name: Capture 25 demos
         run: npm run capture
 
+      - name: Upload capture artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pragmatic-demo-snapshots
+          path: snapshots/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Commit snapshots
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -45,4 +59,5 @@ jobs:
             exit 0
           fi
           git commit -m "chore: refresh 25 demo snapshots"
+          git pull --rebase origin main
           git push
