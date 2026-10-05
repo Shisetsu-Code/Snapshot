@@ -137,7 +137,7 @@ async function advanceObviousDialogs(page) {
 
 async function waitUntilRendered(page) {
   await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-  await page.waitForTimeout(3500);
+  await page.waitForTimeout(2500);
 
   for (let i = 0; i < 20; i++) {
     const rendered = await page.evaluate(() => {
@@ -207,7 +207,7 @@ async function openCandidate(context, candidateIndex) {
   await button.scrollIntoViewIfNeeded();
   const title = await inferTitle(button, `Game ${candidateIndex + 1}`);
 
-  const popupPromise = catalog.waitForEvent("popup", { timeout: 8000 }).catch(() => null);
+  const popupPromise = catalog.waitForEvent("popup", { timeout: 1500 }).catch(() => null);
 
   await button.click({ timeout: 10000 });
   const popup = await popupPromise;
