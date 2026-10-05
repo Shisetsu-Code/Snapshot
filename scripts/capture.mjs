@@ -4,7 +4,7 @@ import path from "node:path";
 
 const CATALOG = "https://www.pragmaticplay.fun/en/slots/";
 const TARGET = 25;
-const MAX_CANDIDATES = 70;
+const MAX_CANDIDATES = 48;
 const VIEWPORT = { width: 1280, height: 720 };
 const OUT = path.resolve("snapshots");
 
@@ -136,10 +136,10 @@ async function advanceObviousDialogs(page) {
 }
 
 async function waitUntilRendered(page) {
-  await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
+  await page.waitForLoadState("domcontentloaded", { timeout: 7000 }).catch(() => {});
   await page.waitForTimeout(2500);
 
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 10; i++) {
     const rendered = await page.evaluate(() => {
       const visibleArea = (el) => {
         const r = el.getBoundingClientRect();
@@ -193,7 +193,7 @@ async function screenshotGame(page) {
 
 async function openCandidate(context, candidateIndex) {
   const catalog = await context.newPage();
-  await catalog.goto(CATALOG, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await catalog.goto(CATALOG, { waitUntil: "domcontentloaded", timeout: 20000 });
   await dismissSiteOverlays(catalog);
   await catalog.waitForTimeout(1000);
 
@@ -242,52 +242,73 @@ async function main() {
   const seen = new Set();
   const rows = [];
 
+  const BATCH_SIZE = 4;
+
   try {
-    for (let candidateIndex = 0; candidateIndex < MAX_CANDIDATES && rows.length < TARGET; candidateIndex++) {
-      let session = null;
+    for (let base = 0; base < MAX_CANDIDATES && rows.length < TARGET; base += BATCH_SIZE) {
+      const indices = Array.from(
+        { length: Math.min(BATCH_SIZE, MAX_CANDIDATES - base) },
+        (_, i) => base + i
+      );
 
-      try {
-        console.log(`[${rows.length + 1}/${TARGET}] candidate ${candidateIndex + 1}`);
-        session = await openCandidate(context, candidateIndex);
-        if (!session) break;
+      const captures = await Promise.all(indices.map(async (candidateIndex) => {
+        let session = null;
 
-        const key = session.title.trim().toLowerCase();
+        try {
+          console.log(`[candidate ${candidateIndex + 1}] opening`);
+          session = await openCandidate(context, candidateIndex);
+          if (!session) return null;
+
+          const jpg = await screenshotGame(session.demo);
+          if (!jpg || jpg.length < 12_000) {
+            throw new Error(`screenshot too small (${jpg?.length || 0} bytes)`);
+          }
+
+          return {
+            candidateIndex,
+            title: session.title,
+            demoUrl: session.demo.url(),
+            jpg
+          };
+        } catch (error) {
+          console.warn(`candidate ${candidateIndex + 1} failed: ${error.message}`);
+          return null;
+        } finally {
+          if (session?.popup && !session.popup.isClosed()) {
+            await session.popup.close().catch(() => {});
+          }
+          if (session?.catalog && !session.catalog.isClosed()) {
+            await session.catalog.close().catch(() => {});
+          }
+        }
+      }));
+
+      for (const capture of captures) {
+        if (!capture || rows.length >= TARGET) continue;
+
+        const key = capture.title.trim().toLowerCase();
         if (seen.has(key)) {
-          console.log(`skip duplicate: ${session.title}`);
+          console.log(`skip duplicate: ${capture.title}`);
           continue;
         }
 
-        const jpg = await screenshotGame(session.demo);
-        if (!jpg || jpg.length < 12_000) {
-          throw new Error(`screenshot too small (${jpg?.length || 0} bytes)`);
-        }
-
         const n = String(rows.length + 1).padStart(2, "0");
-        const file = `${n}-${slugify(session.title)}.jpg`;
-        await fs.writeFile(path.join(OUT, file), jpg);
+        const file = `${n}-${slugify(capture.title)}.jpg`;
+        await fs.writeFile(path.join(OUT, file), capture.jpg);
 
         seen.add(key);
         rows.push({
           number: rows.length + 1,
-          title: session.title,
+          title: capture.title,
           file,
-          catalogIndex: candidateIndex,
-          demoUrl: session.demo.url(),
+          catalogIndex: capture.candidateIndex,
+          demoUrl: capture.demoUrl,
           jpegQuality: 65,
           viewport: VIEWPORT,
           capturedAt: new Date().toISOString()
         });
 
-        console.log(`saved ${file} (${jpg.length} bytes)`);
-      } catch (error) {
-        console.warn(`candidate ${candidateIndex + 1} failed: ${error.message}`);
-      } finally {
-        if (session?.popup && !session.popup.isClosed()) {
-          await session.popup.close().catch(() => {});
-        }
-        if (session?.catalog && !session.catalog.isClosed()) {
-          await session.catalog.close().catch(() => {});
-        }
+        console.log(`saved ${file} (${capture.jpg.length} bytes)`);
       }
     }
   } finally {
