@@ -36,49 +36,107 @@ async function clickIfVisible(locator, timeout = 1200) {
   return false;
 }
 
+async function domClickFirst(page, selectors) {
+  for (const selector of selectors) {
+    try {
+      const locator = page.locator(selector).first();
+      if ((await locator.count()) > 0) {
+        await locator.evaluate((el) => el.click());
+        return true;
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+async function domClickText(page, patterns) {
+  return await page.evaluate((sources) => {
+    const regexes = sources.map((source) => new RegExp(source, "i"));
+    const roots = [document];
+    const elements = [];
+
+    while (roots.length) {
+      const root = roots.pop();
+      for (const el of root.querySelectorAll("button,a,[role='button'],input[type='button'],input[type='submit']")) {
+        elements.push(el);
+        if (el.shadowRoot) roots.push(el.shadowRoot);
+      }
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) roots.push(el.shadowRoot);
+      }
+    }
+
+    for (const el of elements) {
+      const text = (el.textContent || el.value || "").replace(/\\s+/g, " ").trim();
+      if (regexes.some((rx) => rx.test(text))) {
+        el.click();
+        return text;
+      }
+    }
+
+    return null;
+  }, patterns.map((rx) => rx.source)).catch(() => null);
+}
+
+async function waitTextGone(page, pattern, timeout = 5000) {
+  try {
+    await page.getByText(pattern).first().waitFor({ state: "hidden", timeout });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function dismissSiteOverlays(page) {
-  for (let round = 0; round < 3; round++) {
-    const cookiePatterns = [
-      /Accept All/i,
-      /Accept all/i,
-      /Accept cookies/i,
-      /Allow all/i,
-      /I agree/i
-    ];
+  // Cookie consent first. Its overlay can intercept the age-confirmation control.
+  const cookieText = /We value your privacy/i;
+  const cookieVisible = await page.getByText(cookieText).first().isVisible({ timeout: 600 }).catch(() => false);
 
-    for (const pattern of cookiePatterns) {
-      const byRole = page.getByRole("button", { name: pattern });
-      if (await clickIfVisible(byRole, 500)) {
-        await page.waitForTimeout(180);
-        break;
-      }
+  if (cookieVisible) {
+    const clicked =
+      await domClickFirst(page, [
+        "#onetrust-accept-btn-handler",
+        "button#onetrust-accept-btn-handler",
+        "[data-testid='cookie-accept-all']"
+      ]) ||
+      await domClickText(page, [
+        /^Accept All$/i,
+        /^Accept all$/i,
+        /Accept cookies/i,
+        /Allow all/i
+      ]);
+
+    if (clicked) {
+      await waitTextGone(page, cookieText, 6000);
+      await page.waitForTimeout(350);
     }
+  }
 
-    const ageButtons = [
-      page.getByRole("button", { name: /Yes, I am 18 years or older/i }),
-      page.getByText(/Yes, I am 18 years or older/i, { exact: true })
-    ];
+  // Then confirm the official 18+ gate.
+  const ageText = /Pragmatic Play content is intended for persons 18 years and above/i;
+  const ageVisible = await page.getByText(ageText).first().isVisible({ timeout: 600 }).catch(() => false);
 
-    for (const locator of ageButtons) {
-      if (await clickIfVisible(locator, 650)) {
-        await page.waitForTimeout(180);
-        break;
-      }
+  if (ageVisible) {
+    const clicked =
+      await domClickText(page, [
+        /^Yes, I am 18 years or older$/i,
+        /Yes, I am 18 years or older/i
+      ]);
+
+    if (clicked) {
+      await waitTextGone(page, ageText, 6000);
+      await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(500);
     }
+  }
 
-    const ageStillVisible = await page
-      .getByText(/Pragmatic Play content is intended for persons 18 years and above/i)
-      .first()
-      .isVisible({ timeout: 250 })
-      .catch(() => false);
-
-    const cookieStillVisible = await page
-      .getByText(/We value your privacy/i)
-      .first()
-      .isVisible({ timeout: 250 })
-      .catch(() => false);
-
-    if (!ageStillVisible && !cookieStillVisible) break;
+  // Some deployments mount the cookie layer again after age confirmation.
+  const cookieAgain = await page.getByText(cookieText).first().isVisible({ timeout: 300 }).catch(() => false);
+  if (cookieAgain) {
+    await domClickFirst(page, ["#onetrust-accept-btn-handler"]);
+    await domClickText(page, [/^Accept All$/i, /^Accept all$/i]);
+    await waitTextGone(page, cookieText, 4000);
   }
 
   await page.waitForTimeout(300);
