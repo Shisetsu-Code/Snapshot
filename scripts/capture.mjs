@@ -94,22 +94,36 @@ async function dismissSiteOverlays(page) {
   const cookieVisible = await page.getByText(cookieText).first().isVisible({ timeout: 600 }).catch(() => false);
 
   if (cookieVisible) {
-    const clicked =
-      await domClickFirst(page, [
-        "#onetrust-accept-btn-handler",
-        "button#onetrust-accept-btn-handler",
-        "[data-testid='cookie-accept-all']"
-      ]) ||
-      await domClickText(page, [
+    let clicked = false;
+
+    for (const selector of [
+      ".cky-consent-container .cky-btn-accept",
+      ".cky-btn-accept",
+      "#onetrust-accept-btn-handler",
+      "[data-testid='cookie-accept-all']"
+    ]) {
+      try {
+        const button = page.locator(selector).first();
+        if ((await button.count()) > 0) {
+          await button.click({ force: true, timeout: 2500 });
+          clicked = true;
+          break;
+        }
+      } catch {}
+    }
+
+    if (!clicked) {
+      clicked = !!(await domClickText(page, [
         /^Accept All$/i,
         /^Accept all$/i,
         /Accept cookies/i,
         /Allow all/i
-      ]);
+      ]));
+    }
 
     if (clicked) {
-      await waitTextGone(page, cookieText, 6000);
-      await page.waitForTimeout(350);
+      await waitTextGone(page, cookieText, 7000);
+      await page.waitForTimeout(500);
     }
   }
 
@@ -134,9 +148,14 @@ async function dismissSiteOverlays(page) {
   // Some deployments mount the cookie layer again after age confirmation.
   const cookieAgain = await page.getByText(cookieText).first().isVisible({ timeout: 300 }).catch(() => false);
   if (cookieAgain) {
-    await domClickFirst(page, ["#onetrust-accept-btn-handler"]);
-    await domClickText(page, [/^Accept All$/i, /^Accept all$/i]);
-    await waitTextGone(page, cookieText, 4000);
+    try {
+      await page.locator(".cky-consent-container .cky-btn-accept, .cky-btn-accept")
+        .first()
+        .click({ force: true, timeout: 2500 });
+    } catch {
+      await domClickText(page, [/^Accept All$/i, /^Accept all$/i]);
+    }
+    await waitTextGone(page, cookieText, 5000);
   }
 
   await page.waitForTimeout(300);
